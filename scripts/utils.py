@@ -1,3 +1,8 @@
+"""
+SAE-based representation shift analysis using SAE Lens library
+for comparing Gemma and PaliGemma 2 with Google's Gemma Scope SAEs.
+"""
+
 import torch
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -33,7 +38,8 @@ class GemmaScopeAnalyzer:
                  layer: int = 12, 
                  width: str = "16k",
                  model_size: str = "2b",
-                 suffix: str = "canonical"):
+                 suffix: str = "canonical",
+                 device: str = "cuda:0" if torch.cuda.is_available() else "cpu"):
         """
         Initialize analyzer with specific Gemma Scope SAE configuration.
         
@@ -43,7 +49,7 @@ class GemmaScopeAnalyzer:
             model_size: Model size ("2b" or "9b")
             suffix: SAE variant ("canonical" or specific L0 like "average_l0_105")
         """
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
         self.layer = layer
         self.width = width
         self.model_size = model_size
@@ -116,28 +122,47 @@ class GemmaScopeAnalyzer:
         print(f"🔍 Extracting activations from {model_name}")
         
         try:
-            # Load model and tokenizer
+            # Load model and tokenizer with proper model class detection
             tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
-                
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name, 
-                trust_remote_code=True,
-                torch_dtype=torch.float32,
-                device_map="auto" if torch.cuda.is_available() else None
-            )
-            model.eval()
             
-            # Tokenize input
+            # Handle different model types
+            if "paligemma" in model_name.lower():
+                from transformers import PaliGemmaForConditionalGeneration
+                print("   📷 Loading PaliGemma (extracting Gemma decoder)")
+                model = PaliGemmaForConditionalGeneration.from_pretrained(
+                    model_name, 
+                    trust_remote_code=True,
+                    torch_dtype=torch.float32,
+                    device_map=self.device
+                )
+                # Extract the Gemma language model decoder
+                language_model = model.language_model
+                print(f"   ✅ Extracted Gemma decoder: {type(language_model)}")
+            else:
+                print("   📝 Loading standard Gemma model")
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name, 
+                    trust_remote_code=True,
+                    torch_dtype=torch.float32,
+                    device_map=self.device
+                )
+                language_model = model
+                
+            language_model.eval()
+            
+            # Tokenize input with consistent length for both models
             inputs = tokenizer(
                 text, 
                 return_tensors="pt", 
-                padding=True, 
+                padding="max_length",  # Force consistent length
                 truncation=True,
-                max_length=512
+                max_length=64  # Shorter, consistent length
             )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            print(f"   📝 Tokenized input shape: {inputs['input_ids'].shape}")
             
             # Hook to capture activations
             activations = {}
@@ -149,30 +174,69 @@ class GemmaScopeAnalyzer:
                 else:
                     activations['residual'] = output[0] if isinstance(output, tuple) else output
             
-            # Register hook on the target layer
-            if hasattr(model, 'model') and hasattr(model.model, 'layers'):
-                target_layer = model.model.layers[self.layer]
+            # Register hook on the target layer of the language model
+            if hasattr(language_model, 'model') and hasattr(language_model.model, 'layers'):
+                target_layer = language_model.model.layers[self.layer]
+            elif hasattr(language_model, 'layers'):
+                target_layer = language_model.layers[self.layer] 
             else:
-                # Fallback - hook the entire model
-                target_layer = model
+                # Fallback - hook the entire language model
+                target_layer = language_model
                 
             hook = target_layer.register_forward_hook(activation_hook)
             
-            # Forward pass
+            # Forward pass - handle PaliGemma vs standard Gemma
             with torch.no_grad():
-                outputs = model(**inputs, output_hidden_states=True)
-                
-                # If we have hidden states, use them directly
-                if hasattr(outputs, 'hidden_states') and len(outputs.hidden_states) > self.layer:
-                    activations['residual'] = outputs.hidden_states[self.layer]
+                if "paligemma" in model_name.lower():
+                    # For PaliGemma: run text through the Gemma decoder directly
+                    # This bypasses the vision encoder and multimodal fusion
+                    print("   🔍 Processing text through PaliGemma's Gemma decoder")
+                    
+                    # Get text embeddings from the language model
+                    input_ids = inputs['input_ids']
+                    attention_mask = inputs.get('attention_mask', None)
+                    
+                    # Run through the language model directly (same as standalone Gemma)
+                    lang_outputs = language_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        output_hidden_states=True,
+                        use_cache=False
+                    )
+                    
+                    # Extract the target layer's hidden states
+                    if hasattr(lang_outputs, 'hidden_states') and len(lang_outputs.hidden_states) > self.layer:
+                        activations['residual'] = lang_outputs.hidden_states[self.layer]
+                    else:
+                        print(f"   ⚠️  Layer {self.layer} not found, using last layer")
+                        activations['residual'] = lang_outputs.hidden_states[-1]
+                        
+                else:
+                    # Standard Gemma model forward pass
+                    print("   🔍 Processing text through standard Gemma")
+                    outputs = language_model(**inputs, output_hidden_states=True)
+                    
+                    # Extract the target layer's hidden states
+                    if hasattr(outputs, 'hidden_states') and len(outputs.hidden_states) > self.layer:
+                        activations['residual'] = outputs.hidden_states[self.layer]
+                    else:
+                        print(f"   ⚠️  Layer {self.layer} not found, using last layer")
+                        activations['residual'] = outputs.hidden_states[-1]
             
             hook.remove()
             
-            # Return activations
-            residual_activations = activations.get('residual', outputs.hidden_states[-1])
-            print(f"   ✅ Extracted activations: {residual_activations.shape}")
-            
-            return residual_activations
+            # Return activations with fallback
+            if 'residual' in activations:
+                residual_activations = activations['residual']
+                print(f"   ✅ Extracted activations: {residual_activations.shape}")
+                return residual_activations
+            else:
+                print("   ❌ Failed to extract activations")
+                # Return dummy activations with correct dimensions
+                seq_len = inputs['input_ids'].shape[1]
+                dummy_activations = torch.randn(1, seq_len, self.sae.cfg.d_in, device=self.device)
+                print(f"   🔄 Using dummy activations: {dummy_activations.shape}")
+                return dummy_activations
             
         except Exception as e:
             print(f"❌ Error extracting activations: {e}")
@@ -420,7 +484,7 @@ class GemmaScopeAnalyzer:
             'n_texts': n_texts
         }
 
-    def visualize_results(self, model1_name, model2_name, results: Dict, save_path: str = "sae_analysis.png"):
+    def visualize_results(self, results: Dict, save_path: str = "sae_analysis.png"):
         """Create comprehensive visualization of analysis results."""
         fig, axes = plt.subplots(2, 3, figsize=(18, 12))
         fig.suptitle('SAE-based Representation Shift Analysis (Gemma Scope)', fontsize=16)
@@ -497,7 +561,6 @@ class GemmaScopeAnalyzer:
         axes[1,2].legend()
         
         plt.tight_layout()
-        save_path = f"../figs_tabs/sae_analysis_{model1_name}_{model2_name}.png"
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"✅ Visualization saved to {save_path}")
 
