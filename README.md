@@ -10,5 +10,5 @@ It has different layer structures
 The Gemma Scope SAEs were trained on pure Gemma models, not PaliGemma
 The dimensions and layer mappings won't match
 
-Problem 3: Tensor Size Mismatch
-The error shows tensor size mismatch (11 vs 10), indicating different sequence lengths due to tokenization differences.
+Problem 3: Patching tokenizers
+An error pops up when patching Gemma-2 which says assertion error from decvice-side. It is a problem with token ID exceeding available vocab size
