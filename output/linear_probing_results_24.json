@@ -1,0 +1,7 @@
+{
+  "sklearn": {
+    "train_acc": 1.0,
+    "test_acc": 0.5833333333333334,
+    "classification_report": "              precision    recall  f1-score   support\n\n           0       1.00      0.75      0.86        20\n           1       0.00      0.00      0.00        20\n           2       0.44      1.00      0.62        20\n\n    accuracy                           0.58        60\n   macro avg       0.48      0.58      0.49        60\nweighted avg       0.48      0.58      0.49        60\n"
+  }
+}
