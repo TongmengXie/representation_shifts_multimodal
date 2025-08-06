@@ -1,0 +1,12 @@
+{
+  "sklearn": {
+    "train_acc": 1.0,
+    "test_acc": 0.43,
+    "classification_report": "              precision    recall  f1-score   support\n\n           0       0.42      0.35      0.38       100\n           1       0.44      0.51      0.47       100\n\n    accuracy                           0.43       200\n   macro avg       0.43      0.43      0.43       200\nweighted avg       0.43      0.43      0.43       200\n"
+  },
+  "torch": {
+    "train_acc": 1.0,
+    "test_acc": 0.425,
+    "classification_report": "              precision    recall  f1-score   support\n\n           0       0.42      0.37      0.39       100\n           1       0.43      0.48      0.45       100\n\n    accuracy                           0.42       200\n   macro avg       0.42      0.42      0.42       200\nweighted avg       0.42      0.42      0.42       200\n"
+  }
+}
